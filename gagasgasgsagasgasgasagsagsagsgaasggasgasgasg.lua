@@ -42,24 +42,27 @@ print("🟢 Backup Bot starting...")
 task.delay(1, function()
     print("📡 Sending /bot-joined request to API")
 
-    local response = request({
-        Url = API_BASE .. "/bot-joined",
-        Method = "POST",
-        Headers = {
-            ["Content-Type"] = "application/json"
-        },
-        Body = HttpService:JSONEncode({
-            botName = "GrowGardenDelivery2"
+    local success, response = pcall(function()
+        return request({
+            Url = API_BASE .. "/bot-joined",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json"
+            },
+            Body = HttpService:JSONEncode({
+                botName = "GrowGardenDelivery2"
+            })
         })
-    })
+    end)
 
-    if response.Success then
+    if success and response and response.Success then
         print("✅ Successfully registered GrowGardenDelivery2 with API")
         SystemReady = true
     else
         warn("❌ Failed to register bot with API")
     end
 end)
+
 local function SendAPIRequest(method, endpoint, data)
     local success, response = pcall(function()
         return request({
