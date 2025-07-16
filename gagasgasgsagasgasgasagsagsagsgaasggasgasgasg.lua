@@ -39,18 +39,7 @@ local ActiveDelivery = nil
 local DeliveryStatus = {}
 
 print("🟢 Backup Bot starting...")
-task.delay(3, function()
-    local response = SendAPIRequest("POST", "/bot-joined", {
-        botName = "GrowGardenDelivery2"
-    })
-    
-    if response and response.success then
-        print("✅ Backup bot successfully joined the system")
-        SystemReady = true
-    else
-        warn("❌ Failed to join backup bot")
-    end
-end)
+
 local function SendAPIRequest(method, endpoint, data)
     local success, response = pcall(function()
         return request({
@@ -68,6 +57,21 @@ local function SendAPIRequest(method, endpoint, data)
     end
     return nil
 end
+
+
+task.delay(3, function()
+    local response = SendAPIRequest("POST", "/bot-joined", {
+        botName = "GrowGardenDelivery2"
+    })
+    
+    if response and response.success then
+        print("✅ Backup bot successfully joined the system")
+        SystemReady = true
+    else
+        warn("❌ Failed to join backup bot")
+    end
+end)
+
 
 -- Report restock bot presence to API for global coordination
 local function ReportRestockBotStatus(action, restockBots)
