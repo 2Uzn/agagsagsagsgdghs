@@ -35,6 +35,9 @@ local RequestedRestocks = {}
 local IsReady = false
 local ActiveDelivery = nil
 
+-- Track delivery status for each player
+local DeliveryStatus = {}
+
 print("🟢 Backup Bot starting...")
 
 local function SendAPIRequest(method, endpoint, data)
@@ -138,9 +141,22 @@ local function SendPet(petName, target)
     print("📤 Attempting to send", petName, "to", target)
     
     while true do -- Keep trying indefinitely until accepted
-        local success = false
+        -- Check if target player still exists before each attempt
+        local targetPlayer = Players:FindFirstChild(target)
+        if not targetPlayer or not targetPlayer.Parent then
+            print("❌ Target player left server:", target)
+            -- Mark delivery as failed due to player leaving
+            DeliveryStatus[target] = "player_left"
+            return false
+        end
         
-        pcall(function()
+        -- Check if delivery was cancelled externally
+        if DeliveryStatus[target] == "cancelled" then
+            print("❌ Delivery cancelled for:", target)
+            return false
+        end
+        
+        local success = pcall(function()
             local backpack = Players.LocalPlayer.Backpack
             local char = Players.LocalPlayer.Character
             if not backpack or not char then return end
@@ -163,7 +179,7 @@ local function SendPet(petName, target)
                 humanoid:EquipTool(foundTool)
                 task.wait(0.5)
                 print("📤 Sending", foundTool.Name, "to", target)
-                local args = {"GivePet", Players:WaitForChild(target, 5)}
+                local args = {"GivePet", targetPlayer}
                 local rs = game:GetService("ReplicatedStorage")
                 local gameEvents = rs:WaitForChild("GameEvents", 5)
                 local petService = gameEvents and gameEvents:WaitForChild("PetGiftingService", 5)
@@ -171,24 +187,38 @@ local function SendPet(petName, target)
                     petService:FireServer(unpack(args))
                 end
                 
-                -- Check if sent (pet removed from inventory)
+                -- Check if sent for max 10 seconds
                 local checkAttempts = 0
-                while checkAttempts < 15 and (foundTool:IsDescendantOf(backpack) or foundTool:IsDescendantOf(char)) do
+                while checkAttempts < 10 do
                     checkAttempts += 1
                     task.wait(1)
+                    
+                    -- Check if target player still exists during wait
+                    if not targetPlayer.Parent then
+                        print("❌ Target player left during pet sending:", target)
+                        DeliveryStatus[target] = "player_left"
+                        return false
+                    end
+                    
+                    -- Check if delivery was cancelled externally
+                    if DeliveryStatus[target] == "cancelled" then
+                        print("❌ Delivery cancelled during pet sending:", target)
+                        return false
+                    end
+                    
+                    if not foundTool:IsDescendantOf(backpack) and not foundTool:IsDescendantOf(char) then
+                        print("✅ Pet confirmed sent and removed:", foundTool.Name)
+                        return true
+                    end
                 end
                 
-                -- Verify pet was actually removed
-                if not foundTool:IsDescendantOf(backpack) and not foundTool:IsDescendantOf(char) then
-                    print("✅ Pet confirmed sent and removed:", foundTool.Name)
-                    success = true
-                else
-                    print("❌ Pet still in inventory, retrying...")
-                end
+                print("❌ Pet still in inventory after 10 seconds, retrying...")
             end
+            return false
         end)
         
         if success then return true end
+        if success == false then return false end -- Player left or delivery cancelled
         task.wait(2) -- Wait before retry
     end
 end
@@ -313,13 +343,6 @@ local function CheckForPetChecks()
     end
 end
 
--- Whitelist system - only these players can get deliveries
-local ALLOWED_PLAYERS = {
-    ["GrowGardenDelivery"] = true,  -- Main bot
-    ["GrowGardenDelivery2"] = true, -- Backup bot
-    -- Add any other allowed players here
-}
-
 local function CheckForDeliveries()
     if ActiveDelivery or not SystemReady then return end
 
@@ -357,6 +380,9 @@ local function CheckForDeliveries()
                 startTime = tick()
             }
 
+            -- Initialize delivery status
+            DeliveryStatus[customerName] = "delivering"
+
             task.spawn(function()
                 local deliveredPets = {}
                 local allSuccess = true
@@ -365,6 +391,7 @@ local function CheckForDeliveries()
                 if not targetPlayer then
                     print("❌ Player not found:", customerName)
                     allSuccess = false
+                    DeliveryStatus[customerName] = "player_not_found"
                 else
                     print("📦 Delivering", #pets, "pet types to", customerName)
                     
@@ -376,12 +403,14 @@ local function CheckForDeliveries()
                                 if not SystemReady then
                                     print("❌ System became unavailable during delivery")
                                     allSuccess = false
+                                    DeliveryStatus[customerName] = "system_not_ready"
                                     break
                                 end
                                 
                                 if not targetPlayer.Parent then
                                     print("❌ Player left during delivery")
                                     allSuccess = false
+                                    DeliveryStatus[customerName] = "player_left"
                                     break
                                 end
                                 
@@ -392,6 +421,7 @@ local function CheckForDeliveries()
                                 else
                                     allSuccess = false
                                     print("❌ Failed to send:", pet.name)
+                                    DeliveryStatus[customerName] = "pet_delivery_failed"
                                     break
                                 end
                             end
@@ -412,12 +442,22 @@ local function CheckForDeliveries()
                 if allSuccess then
                     print("📡 Reported delivery completion - SUCCESS")
                     print("✅ All pets delivered successfully to", customerName)
+                    DeliveryStatus[customerName] = "completed"
                 else
                     print("📡 Reported delivery completion - FAILED")
                     print("❌ Some pets failed to deliver to", customerName)
+                    if not DeliveryStatus[customerName] then
+                        DeliveryStatus[customerName] = "delivery_failed"
+                    end
                 end
                 
                 ActiveDelivery = nil
+                
+                -- Clean up delivery status after delay
+                task.wait(10)
+                if DeliveryStatus[customerName] then
+                    DeliveryStatus[customerName] = nil
+                end
             end)
         end
     end
@@ -438,13 +478,21 @@ Players.PlayerAdded:Connect(function(player)
     end
 end)
 
+-- Handle player leaving - cancel any active deliveries
 Players.PlayerRemoving:Connect(function(player)
     if player == Players.LocalPlayer then
         print("👋 Backup bot leaving server via PlayerRemoving")
         SendAPIRequest("POST", "/bot-left", { botName = "GrowGardenDelivery2" })
         return
     end
-    
+
+    -- Cancel delivery if this player is being processed
+    if DeliveryStatus[player.Name] then
+        print("❌ Player left during delivery, cancelling:", player.Name)
+        DeliveryStatus[player.Name] = "cancelled"
+    end
+
+    -- Report if restock bot left (optional for coordination)
     local restockBotsLeft = {}
     for _, restockBot in ipairs(RESTOCK_BOTS) do
         if player.Name == restockBot then
@@ -452,116 +500,9 @@ Players.PlayerRemoving:Connect(function(player)
             print("👋 Restock bot left:", restockBot)
         end
     end
-    
+
     if #restockBotsLeft > 0 then
         ReportRestockBotStatus("left", restockBotsLeft)
-        RequestedRestocks = {} -- Reset restock requests when restock bots leave
-    end
-    
-    -- If the player we're delivering to leaves, cancel the delivery
-    if ActiveDelivery and player.Name == ActiveDelivery.customer then
-        print("❌ Customer left during delivery:", player.Name)
-        ActiveDelivery = nil
-    end
-end)
-
--- Auto-accept gifts from restock bots
-task.spawn(function()
-    local gui = Players.LocalPlayer:WaitForChild("PlayerGui")
-    while Players.LocalPlayer.Parent do
-        pcall(function()
-            local notif = gui:FindFirstChild("Gift_Notification")
-            local frame = notif and notif:FindFirstChild("Frame")
-            local inner = frame and frame:FindFirstChild("Gift_Notification")
-            local holder = inner and inner:FindFirstChild("Holder")
-            local acceptFrame = holder and holder:FindFirstChild("Frame")
-            local notifUI = holder and holder:FindFirstChild("Notification_UI")
-            local acceptBtn = acceptFrame and acceptFrame:FindFirstChild("Accept")
-            local label = notifUI and notifUI:FindFirstChild("TextLabel")
-
-            if acceptBtn and label and acceptBtn.Visible then
-                local username = label.Text:match("Gift from @(.+)")
-                if username then
-                    for _, restockBot in ipairs(RESTOCK_BOTS) do
-                        if username:lower() == restockBot:lower() then
-                            print("🎁 Auto-accepting gift from Restock bot:", username)
-                            local x = acceptBtn.AbsolutePosition.X + acceptBtn.AbsoluteSize.X / 2
-                            local y = acceptBtn.AbsolutePosition.Y + 66
-                            VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
-                            task.wait(0.05)
-                            VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
-                            task.wait(1)
-                            break
-                        end
-                    end
-                end
-            end
-        end)
-        task.wait(0.5)
-    end
-end)
-
--- Monitor system status
-local function CheckSystemStatus()
-    local status = SendAPIRequest("GET", "/status")
-    if status then
-        local wasReady = SystemReady
-        SystemReady = status.systemActive and not status.globalState.systemPaused
-        
-        if not wasReady and SystemReady then
-            print("✅ SYSTEM READY - Backup bot can process requests")
-        elseif wasReady and not SystemReady then
-            print("❌ SYSTEM PAUSED - Backup bot paused")
-            if status.globalState and status.globalState.restockBotsPresent then
-                print("📋 Restock bots present:", table.concat(status.globalState.restockBotsPresent, ", "))
-            end
-        end
-    else
-        if SystemReady then
-            SystemReady = false
-            print("❌ API connection lost - Backup bot paused")
-        end
-    end
-end
-
--- Announce backup bot joined and initialize
-SendAPIRequest("POST", "/bot-joined", { botName = "GrowGardenDelivery2" })
-task.wait(1)
-IsReady = true
-
--- Check for existing restock bots and report
-local existingRestockBots = {}
-for _, player in ipairs(Players:GetPlayers()) do
-    for _, restockBot in ipairs(RESTOCK_BOTS) do
-        if player.Name == restockBot then
-            table.insert(existingRestockBots, restockBot)
-            print("🛑 Restock bot already in server:", restockBot)
-        end
-    end
-end
-
-if #existingRestockBots > 0 then
-    ReportRestockBotStatus("joined", existingRestockBots)
-end
-
--- Monitor system status every 3 seconds
-task.spawn(function()
-    print("🔍 Starting system status monitoring")
-    while Players.LocalPlayer.Parent do
-        CheckSystemStatus()
-        task.wait(3)
-    end
-end)
-
--- Main processing loop
-task.spawn(function()
-    print("🔄 Starting main processing loop")
-    while Players.LocalPlayer.Parent do
-        if IsReady and SystemReady then
-            CheckThresholds()
-            CheckForPetChecks()
-            CheckForDeliveries()
-        end
-        task.wait(2)
+        RequestedRestocks = {} -- Reset restock requests when a restock bot leaves
     end
 end)
