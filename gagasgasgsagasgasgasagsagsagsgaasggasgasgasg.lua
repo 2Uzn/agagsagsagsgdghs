@@ -13,7 +13,6 @@ local BACKUP_BOT_PETS = {
     ["Raptor"] = true
 }
 
--- UPDATED STOCK SYSTEM: {min, max} - When at or below min, request to max
 local RestockThresholds = {
     ["Mimic Octopus"] = {min = 2, max = 10},
     ["Fennec Fox"] = {min = 2, max = 10},
@@ -21,7 +20,6 @@ local RestockThresholds = {
     ["Raptor"] = {min = 2, max = 10},
 }
 
--- UNIFIED restock bot list (matches API and main bot)
 local RESTOCK_BOTS = {
     "fennec_stocks", "octo_stocks", "TRex_stocks", "raptor_stocks",
     "disco_stocks", "Racc_stocks", "dragon_flystocks", "chickenz_stocks",
@@ -34,13 +32,13 @@ local SystemReady = false
 local RequestedRestocks = {}
 local IsReady = false
 local ActiveDelivery = nil
-
--- Track delivery status for each player
 local DeliveryStatus = {}
 
 print("🟢 Backup Bot starting...")
+
+-- ✅ Send /bot-joined request to API (MISSING PIECE)
 task.delay(1, function()
-    print("📡 Sending /bot-joined request to API")
+    print("📡 Sending /bot-joined request to API...")
 
     local success, response = pcall(function()
         return request({
@@ -59,10 +57,10 @@ task.delay(1, function()
         print("✅ Successfully registered GrowGardenDelivery2 with API")
         SystemReady = true
     else
-        warn("❌ Failed to register bot with API")
-        end 
+        warn("❌ Failed to register GrowGardenDelivery2 with API")
     end
 end)
+
 
 local function SendAPIRequest(method, endpoint, data)
     local success, response = pcall(function()
