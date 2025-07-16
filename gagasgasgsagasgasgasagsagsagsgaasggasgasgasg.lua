@@ -60,6 +60,7 @@ task.delay(1, function()
         SystemReady = true
     else
         warn("❌ Failed to register bot with API")
+        end 
     end
 end)
 
