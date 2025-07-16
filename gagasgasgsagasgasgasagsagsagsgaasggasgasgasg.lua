@@ -39,7 +39,18 @@ local ActiveDelivery = nil
 local DeliveryStatus = {}
 
 print("🟢 Backup Bot starting...")
-
+task.delay(3, function()
+    local response = SendAPIRequest("POST", "/bot-joined", {
+        botName = "GrowGardenDelivery2"
+    })
+    
+    if response and response.success then
+        print("✅ Backup bot successfully joined the system")
+        SystemReady = true
+    else
+        warn("❌ Failed to join backup bot")
+    end
+end)
 local function SendAPIRequest(method, endpoint, data)
     local success, response = pcall(function()
         return request({
@@ -504,5 +515,17 @@ Players.PlayerRemoving:Connect(function(player)
     if #restockBotsLeft > 0 then
         ReportRestockBotStatus("left", restockBotsLeft)
         RequestedRestocks = {} -- Reset restock requests when a restock bot leaves
+    end
+end)
+
+
+task.spawn(function()
+    while true do
+        if SystemReady then
+            CheckThresholds()
+            CheckForPetChecks()
+            CheckForDeliveries()
+        end
+        task.wait(5) -- Adjust interval as needed
     end
 end)
