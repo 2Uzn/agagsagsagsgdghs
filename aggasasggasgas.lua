@@ -335,6 +335,9 @@ local function HasSheckles()
     return false
 end
 
+-- Track delivery status for each player
+local DeliveryStatus = {}
+
 -- Auto-accept gifts from restock bots
 task.spawn(function()
     local gui = game.Players.LocalPlayer:WaitForChild("PlayerGui")
@@ -384,60 +387,76 @@ local function SendPet(petName, target)
     print("📤 Attempting to send", petName, "to", target)
     
     while true do -- Keep trying indefinitely until accepted
-        local success = false
+        -- Check if target player still exists before each attempt
+        local targetPlayer = game:GetService("Players"):FindFirstChild(target)
+        if not targetPlayer or not targetPlayer.Parent then
+            print("❌ Target player left server:", target)
+            -- Mark delivery as failed due to player leaving
+            DeliveryStatus[target] = "player_left"
+            return false
+        end
         
-        pcall(function()
+        -- Check if delivery was cancelled externally
+        if DeliveryStatus[target] == "cancelled" then
+            print("❌ Delivery cancelled for:", target)
+            return false
+        end
+        
+        local success = pcall(function()
             local backpack = game.Players.LocalPlayer.Backpack
             local char = game.Players.LocalPlayer.Character
             if not backpack or not char then return end
             
-            local foundTool = nil
             for _, tool in ipairs(backpack:GetChildren()) do
                 if tool:IsA("Tool") and tool.Name and tool.Name:lower():find(petName:lower(), 1, true) then
-                    foundTool = tool
-                    break
-                end
-            end
-            
-            if not foundTool then
-                print("❌ Pet not found in backpack:", petName)
-                return
-            end
-            
-            local humanoid = char:FindFirstChild("Humanoid")
-            if humanoid then
-                humanoid:EquipTool(foundTool)
-                task.wait(0.5)
-                
-                print("📤 Sending", foundTool.Name, "to", target)
-                local args = {"GivePet", game:GetService("Players"):WaitForChild(target, 5)}
-                local rs = game:GetService("ReplicatedStorage")
-                local gameEvents = rs:WaitForChild("GameEvents", 5)
-                local petService = gameEvents and gameEvents:WaitForChild("PetGiftingService", 5)
-                
-                if petService then
-                    petService:FireServer(unpack(args))
-                end
-                
-                -- Check if sent (pet removed from inventory)
-                local checkAttempts = 0
-                while checkAttempts < 15 and (foundTool:IsDescendantOf(backpack) or foundTool:IsDescendantOf(char)) do
-                    checkAttempts += 1
-                    task.wait(1)
-                end
-                
-                -- Verify pet was actually removed
-                if not foundTool:IsDescendantOf(backpack) and not foundTool:IsDescendantOf(char) then
-                    print("✅ Pet confirmed sent and removed:", foundTool.Name)
-                    success = true
-                else
-                    print("❌ Pet still in inventory, retrying...")
+                    local humanoid = char:FindFirstChild("Humanoid")
+                    if humanoid then
+                        humanoid:EquipTool(tool)
+                        task.wait(0.5)
+                        
+                        print("📤 Sending", tool.Name, "to", target)
+                        local args = {"GivePet", targetPlayer}
+                        local rs = game:GetService("ReplicatedStorage")
+                        local gameEvents = rs:WaitForChild("GameEvents", 5)
+                        local petService = gameEvents and gameEvents:WaitForChild("PetGiftingService", 5)
+                        
+                        if petService then
+                            petService:FireServer(unpack(args))
+                        end
+                        
+                        -- Check if sent for max 10 seconds
+                        local checkAttempts = 0
+                        while checkAttempts < 10 do
+                            checkAttempts += 1
+                            task.wait(1)
+                            
+                            -- Check if target player still exists during wait
+                            if not targetPlayer.Parent then
+                                print("❌ Target player left during pet sending:", target)
+                                DeliveryStatus[target] = "player_left"
+                                return false
+                            end
+                            
+                            -- Check if delivery was cancelled externally
+                            if DeliveryStatus[target] == "cancelled" then
+                                print("❌ Delivery cancelled during pet sending:", target)
+                                return false
+                            end
+                            
+                            if not tool:IsDescendantOf(backpack) and not tool:IsDescendantOf(char) then
+                                print("✅ Pet accepted:", tool.Name)
+                                return true
+                            end
+                        end
+                    end
+                    return false
                 end
             end
         end)
         
         if success then return true end
-        task.wait(2) -- Wait before retry
+        if success == false then return false end -- Player left or delivery cancelled
+        task.wait(1)
     end
 end
 
@@ -490,6 +509,13 @@ local function DeliverCoins(player)
         -- Check if player still exists
         if not player.Parent then
             print("❌ Player left during coin delivery")
+            DeliveryStatus[player.Name] = "player_left"
+            return false
+        end
+        
+        -- Check if delivery was cancelled externally
+        if DeliveryStatus[player.Name] == "cancelled" then
+            print("❌ Coin delivery cancelled")
             return false
         end
         
@@ -525,9 +551,13 @@ local function ProcessPlayer(player)
         return false
     end
     
+    -- Initialize delivery status
+    DeliveryStatus[player.Name] = "processing"
+    
     -- Double-check system is ready before processing
     if not SystemReady then
         print("❌ System not ready - aborting order processing for:", player.Name)
+        DeliveryStatus[player.Name] = "system_not_ready"
         return false
     end
     
@@ -545,6 +575,7 @@ local function ProcessPlayer(player)
     
     if not apiSuccess or not orders then
         print("❌ Failed to fetch orders for:", player.Name)
+        DeliveryStatus[player.Name] = "api_error"
         return false
     end
     
@@ -555,6 +586,7 @@ local function ProcessPlayer(player)
     
     if not parseSuccess or not decoded or not decoded.orders then
         print("❌ Failed to parse orders for:", player.Name)
+        DeliveryStatus[player.Name] = "parse_error"
         return false
     end
     
@@ -581,6 +613,7 @@ local function ProcessPlayer(player)
     
     if not order then 
         print("❌ No valid order found for:", player.Name)
+        DeliveryStatus[player.Name] = "no_order"
         return false
     end
     
@@ -589,6 +622,7 @@ local function ProcessPlayer(player)
     -- Check if player still exists before proceeding
     if not player.Parent then
         print("❌ Player left during order processing:", player.Name)
+        DeliveryStatus[player.Name] = "player_left"
         return false
     end
     
@@ -598,12 +632,14 @@ local function ProcessPlayer(player)
         pcall(function()
             TextChatService.TextChannels.RBXGeneral:SendAsync("Sorry " .. player.Name .. ", we are currently out of sheckles. Please rejoin later when we have restocked!")
         end)
+        DeliveryStatus[player.Name] = "no_sheckles"
         return false
     end
     
     -- Final system check before delivery
     if not SystemReady then
         print("❌ System became unavailable during order processing for:", player.Name)
+        DeliveryStatus[player.Name] = "system_not_ready"
         return false
     end
     
@@ -616,6 +652,7 @@ local function ProcessPlayer(player)
     local backpack = game.Players.LocalPlayer.Backpack
     if not backpack then 
         print("❌ No backpack available for:", player.Name)
+        DeliveryStatus[player.Name] = "no_backpack"
         return false
     end
     
@@ -679,6 +716,7 @@ local function ProcessPlayer(player)
             end
             TextChatService.TextChannels.RBXGeneral:SendAsync("Sorry " .. player.Name .. ", we are currently out of " .. table.concat(petNames, ", ") .. ". Please rejoin later when we have restocked!")
         end)
+        DeliveryStatus[player.Name] = "missing_pets"
         return false
     end
     
@@ -688,8 +726,11 @@ local function ProcessPlayer(player)
     -- Check if player still exists before starting delivery
     if not player.Parent then
         print("❌ Player left before delivery started:", player.Name)
+        DeliveryStatus[player.Name] = "player_left"
         return false
     end
+    
+    DeliveryStatus[player.Name] = "delivering"
     
     pcall(function()
         TextChatService.TextChannels.RBXGeneral:SendAsync(("Hello %s, thank you for choosing growgarden . gg!"):format(player.Name))
@@ -701,6 +742,7 @@ local function ProcessPlayer(player)
         print("💰 Delivering coins to", player.Name)
         if not DeliverCoins(player) then
             print("❌ Failed to deliver coins to:", player.Name)
+            DeliveryStatus[player.Name] = "coin_delivery_failed"
             return false
         end
     end
@@ -714,6 +756,7 @@ local function ProcessPlayer(player)
             pcall(function()
                 TextChatService.TextChannels.RBXGeneral:SendAsync("⚠️ Backup delivery failed to start - please contact support")
             end)
+            DeliveryStatus[player.Name] = "backup_delivery_failed"
             return false
         end
     end
@@ -724,16 +767,19 @@ local function ProcessPlayer(player)
         for i = 1, pet.quantity do
             if not player.Parent then 
                 print("❌ Player left during pet delivery:", player.Name)
+                DeliveryStatus[player.Name] = "player_left"
                 return false
             end
             if not SystemReady then
                 print("❌ System became unavailable during pet delivery for:", player.Name)
+                DeliveryStatus[player.Name] = "system_not_ready"
                 return false
             end
             
             local success = SendPet(pet.name, player.Name)
             if not success then
                 print("❌ Failed to send pet", pet.name, "to:", player.Name)
+                DeliveryStatus[player.Name] = "pet_delivery_failed"
                 return false
             end
             table.insert(deliveredPets, pet.name)
@@ -749,20 +795,13 @@ local function ProcessPlayer(player)
             pcall(function()
                 TextChatService.TextChannels.RBXGeneral:SendAsync("⚠️ Backup delivery failed - please contact support")
             end)
+            DeliveryStatus[player.Name] = "backup_delivery_failed"
             return false
         end
     end
     
+    -- Fulfill order ONLY after all deliveries are confirmed complete
     pcall(function()
-        TextChatService.TextChannels.RBXGeneral:SendAsync("Your order has successfully been delivered!")
-        TextChatService.TextChannels.RBXGeneral:SendAsync("Please don't forget to leave a review on Trustpilot ❤️")
-    end)
-    
-    print("🎉 Delivery completed for", player.Name)
-    
-    -- Only fulfill order if ALL pets were successfully delivered
-    print("📋 All pets delivered successfully, fulfilling order...")
-    local fulfillSuccess = pcall(function()
         local fulfillmentOrdersData = HttpService:JSONDecode(request({
             Url = string.format("https://3r14ih-6j.myshopify.com/admin/api/2023-04/orders/%d/fulfillment_orders.json", order.id),
             Method = "GET",
@@ -777,15 +816,18 @@ local function ProcessPlayer(player)
                     Headers = API_HEADERS,
                     Body = HttpService:JSONEncode({fulfillment = {line_items_by_fulfillment_order = {{fulfillment_order_id = fOrder.id}}}})
                 })
-                print("✅ Order fulfilled successfully")
+                print("✅ Order fulfilled in Shopify for", player.Name)
                 break
             end
         end
     end)
     
-    if not fulfillSuccess then
-        print("❌ Failed to fulfill order for:", player.Name)
-    end
+    pcall(function()
+        TextChatService.TextChannels.RBXGeneral:SendAsync("Your order has successfully been delivered!")
+    end)
+    
+    print("🎉 Delivery completed for", player.Name)
+    DeliveryStatus[player.Name] = "completed"
     
     return true -- Success
 end
@@ -847,6 +889,7 @@ function ProcessQueue()
         -- Check if player left during processing
         if not player.Parent then
             print("❌ Player left during processing, canceling...")
+            DeliveryStatus[player.Name] = "cancelled"
             task.cancel(processingThread)
             break
         end
@@ -854,11 +897,17 @@ function ProcessQueue()
     
     if elapsed >= timeout then
         print("⏰ Processing timed out for:", player.Name)
+        DeliveryStatus[player.Name] = "timeout"
         task.cancel(processingThread)
     end
     
-    -- Always reset CurrentDelivery
+    -- Always reset CurrentDelivery and clean up delivery status
     CurrentDelivery = nil
+    if DeliveryStatus[player.Name] then
+        task.wait(10) -- Keep status for 10 seconds for debugging
+        DeliveryStatus[player.Name] = nil
+    end
+    
     print("✅ Delivery processing completed for:", player.Name)
     
     -- Process next player after delay
@@ -936,11 +985,18 @@ game.Players.PlayerAdded:Connect(function(player)
     end)
 end)
 
+-- Handle player leaving - cancel any active deliveries
 game.Players.PlayerRemoving:Connect(function(player)
     if player == game.Players.LocalPlayer then
         print("👋 Main bot leaving server via PlayerRemoving")
         AnnounceLeaving()
         return
+    end
+    
+    -- Cancel delivery if this player is being processed
+    if DeliveryStatus[player.Name] then
+        print("❌ Player left during delivery, cancelling:", player.Name)
+        DeliveryStatus[player.Name] = "cancelled"
     end
     
     local restockBotsLeft = {}
@@ -957,7 +1013,7 @@ game.Players.PlayerRemoving:Connect(function(player)
         return
     end
     
-    -- Regular player left
+    -- Regular player left - remove from queue
     for i, p in ipairs(Queue) do
         if p == player then
             table.remove(Queue, i)
