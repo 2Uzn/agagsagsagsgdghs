@@ -58,21 +58,6 @@ local function SendAPIRequest(method, endpoint, data)
     return nil
 end
 
-
-task.delay(3, function()
-    local response = SendAPIRequest("POST", "/bot-joined", {
-        botName = "GrowGardenDelivery2"
-    })
-    
-    if response and response.success then
-        print("✅ Backup bot successfully joined the system")
-        SystemReady = true
-    else
-        warn("❌ Failed to join backup bot")
-    end
-end)
-
-
 -- Report restock bot presence to API for global coordination
 local function ReportRestockBotStatus(action, restockBots)
     local response = SendAPIRequest("POST", "/restock-bot-status", {
@@ -478,6 +463,90 @@ local function CheckForDeliveries()
     end
 end
 
+-- Announce backup bot joined on startup
+local function AnnounceJoined()
+    local response = SendAPIRequest("POST", "/bot-joined", {botName = "GrowGardenDelivery2"})
+    if response and response.success then
+        print("📢 Announced backup bot joined to API successfully")
+        print("🤖 Bot status:", response.status)
+        print("🌍 Global state:", response.globalState)
+    else
+        print("❌ Failed to announce backup bot joined to API")
+    end
+end
+
+-- Announce backup bot leaving
+local function AnnounceLeaving()
+    SendAPIRequest("POST", "/bot-left", {botName = "GrowGardenDelivery2"})
+    print("📢 Announced backup bot leaving to API")
+end
+
+-- Check system status and set SystemReady
+local function CheckSystemStatus()
+    local status = SendAPIRequest("GET", "/status")
+    if status then
+        local wasReady = SystemReady
+        SystemReady = status.systemActive and status.backupReady
+        
+        if not wasReady and SystemReady then
+            print("✅ BACKUP BOT SYSTEM READY - Starting monitoring")
+        elseif wasReady and not SystemReady then
+            print("❌ BACKUP BOT SYSTEM PAUSED")
+            if status.globalState and status.globalState.restockBotsPresent then
+                print("📋 Restock bots present:", table.concat(status.globalState.restockBotsPresent, ", "))
+            end
+        end
+        
+        if status.readyIn and status.readyIn > 0 then
+            print("⏳ Backup bot ready in", status.readyIn, "seconds")
+        end
+    else
+        if SystemReady then
+            SystemReady = false
+            print("❌ API connection lost - Backup bot paused")
+        end
+    end
+end
+
+-- Call the announcement function on startup
+AnnounceJoined()
+
+-- Start system status monitoring
+task.spawn(function()
+    print("🔍 Starting backup bot system status monitoring")
+    while Players.LocalPlayer.Parent do
+        CheckSystemStatus()
+        task.wait(3)
+    end
+end)
+
+-- Start pet check monitoring
+task.spawn(function()
+    print("🔍 Starting pet check monitoring")
+    while Players.LocalPlayer.Parent do
+        CheckForPetChecks()
+        task.wait(2)
+    end
+end)
+
+-- Start delivery monitoring
+task.spawn(function()
+    print("🚚 Starting delivery monitoring")
+    while Players.LocalPlayer.Parent do
+        CheckForDeliveries()
+        task.wait(2)
+    end
+end)
+
+-- Start threshold checking
+task.spawn(function()
+    print("📊 Starting threshold monitoring")
+    while Players.LocalPlayer.Parent do
+        CheckThresholds()
+        task.wait(30)
+    end
+end)
+
 -- Monitor restock bots and report to API
 Players.PlayerAdded:Connect(function(player)
     local restockBotsJoined = {}
@@ -497,7 +566,7 @@ end)
 Players.PlayerRemoving:Connect(function(player)
     if player == Players.LocalPlayer then
         print("👋 Backup bot leaving server via PlayerRemoving")
-        SendAPIRequest("POST", "/bot-left", { botName = "GrowGardenDelivery2" })
+        AnnounceLeaving()
         return
     end
 
@@ -522,14 +591,19 @@ Players.PlayerRemoving:Connect(function(player)
     end
 end)
 
-
-task.spawn(function()
-    while true do
-        if SystemReady then
-            CheckThresholds()
-            CheckForPetChecks()
-            CheckForDeliveries()
+-- Check for existing restock bots on startup
+local existingRestockBots = {}
+for _, player in ipairs(Players:GetPlayers()) do
+    for _, restockBot in ipairs(RESTOCK_BOTS) do
+        if player.Name == restockBot then
+            table.insert(existingRestockBots, restockBot)
+            print("🛑 Restock bot already in server:", restockBot)
         end
-        task.wait(5) -- Adjust interval as needed
     end
-end)
+end
+
+if #existingRestockBots > 0 then
+    ReportRestockBotStatus("joined", existingRestockBots)
+end
+
+print("🚀 Backup bot fully initialized and ready!")
